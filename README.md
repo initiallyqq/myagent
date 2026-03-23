@@ -42,7 +42,7 @@ MCP Server (/mcp/tools/list, /mcp/tools/call)
 | 组件 | 选型 | 理由 |
 |---|---|---|
 | 业务层 | Go 1.25 / Gin | 高并发，原生 SSE 支持 |
-| 大模型 | DeepSeek-V3 / Qwen-Max | Function Calling + JSON Mode |
+| 大模型 | Qwen-Plus (chat) + text-embedding-v3 | Function Calling + JSON Mode + 1024 维向量 |
 | Agent 范式 | ReAct (Reason + Act + Observe) | 多轮自主推理，最大 6 步 |
 | 记忆层 | mem0 风格持久记忆 | 向量检索历史记忆 + System Prompt 注入 |
 | 工具协议 | Model Context Protocol (MCP) | 标准化工具发现与调用 |
@@ -60,20 +60,22 @@ MCP Server (/mcp/tools/list, /mcp/tools/call)
 ```
 myagent/
 │
-├── cmd/server/main.go                  # 程序入口：依赖注入 / 路由注册 / 优雅关机
+├── cmd/
+│   └── server/
+│       └── main.go                     # 程序入口：依赖注入 / 路由注册 / 优雅关机
 │
 ├── internal/
 │   │
-│   ├── ── 接入层 ──────────────────────────────────────────
+│   ├── ── 接入层 ──────────────────────────────────────────────
 │   ├── handler/
-│   │   ├── search.go                   # POST /api/v1/search  → Orchestrator → SSE
+│   │   ├── search.go                   # POST /api/v1/search → Orchestrator → SSE
 │   │   ├── user.go                     # POST /api/v1/user/register
 │   │   └── subscribe.go                # POST /api/v1/subscribe
 │   ├── middleware/
 │   │   ├── ratelimit.go                # Redis 滑动窗口限流
 │   │   └── timeout.go                  # 请求级超时中间件
 │   │
-│   ├── ── Agent 层 ─────────────────────────────────────────
+│   ├── ── Agent 层 ─────────────────────────────────────────────
 │   ├── agent/
 │   │   └── orchestrator.go             # ReAct 循环 (Reason → Act → Observe, max 6步)
 │   ├── memory/
@@ -81,15 +83,15 @@ myagent/
 │   │   └── manager.go                  # 记忆提取（异步 LLM 抽取）+ System Prompt 注入
 │   ├── mcp/
 │   │   ├── tools.go                    # OpenAI 兼容 Tool Schema 定义 (ToolDefs)
-│   │   └── server.go                   # MCP HTTP 端点：GET /mcp/tools/list, POST /mcp/tools/call
+│   │   └── server.go                   # MCP HTTP 端点：/mcp/tools/list, /mcp/tools/call
 │   ├── skill/
 │   │   ├── registry.go                 # Skill 接口 + Registry（注册 / 调度 / ToolDispatcher）
-│   │   ├── search.go                   # SearchSkill     → 三级降级混合检索
-│   │   ├── memory_skill.go             # MemorySkill     → 持久化记忆事实
-│   │   ├── suspend.go                  # SuspendSkill    → 意图悬挂写 demand_pool
-│   │   └── profile.go                  # ProfileSkill    → 查询当前用户画像
+│   │   ├── search.go                   # SearchSkill    → 三级降级混合检索
+│   │   ├── memory_skill.go             # MemorySkill    → 持久化记忆事实
+│   │   ├── suspend.go                  # SuspendSkill   → 意图悬挂写 demand_pool
+│   │   └── profile.go                  # ProfileSkill   → 查询当前用户画像
 │   │
-│   ├── ── 业务服务层 ───────────────────────────────────────
+│   ├── ── 业务服务层 ──────────────────────────────────────────
 │   ├── service/
 │   │   ├── intent.go                   # LLM 意图提取 → 防腐校验 → 正则兜底合并
 │   │   ├── search.go                   # 三级降级检索主逻辑 + 意图悬挂触发
@@ -98,12 +100,12 @@ myagent/
 │   ├── cron/
 │   │   └── match_job.go                # 定时反向匹配（新用户唤醒 demand_pool）
 │   │
-│   ├── ── LLM 层 ───────────────────────────────────────────
+│   ├── ── LLM 层 ───────────────────────────────────────────────
 │   ├── llm/
-│   │   ├── client.go                   # HTTP 调用 LLM；支持 JSON Mode + Function Calling
+│   │   ├── client.go                   # HTTP 调用 LLM；JSON Mode + Function Calling
 │   │   └── fallback_regex.go           # 正则兜底：目的地词典 / 性别 / 预算解析
 │   │
-│   ├── ── 数据层 ───────────────────────────────────────────
+│   ├── ── 数据层 ───────────────────────────────────────────────
 │   ├── repo/
 │   │   ├── user_repo.go                # Upsert / HybridSearch / VectorLiteral()
 │   │   └── demand_repo.go              # CRUD + 批量余弦相似度查询
@@ -112,21 +114,30 @@ myagent/
 │   │   ├── demand.go                   # 需求池模型
 │   │   └── intent.go                   # Intent struct + Validate()
 │   │
-│   └── config/config.go                # YAML 配置加载（单例）
+│   └── config/
+│       └── config.go                   # YAML 配置加载（单例，支持 CONFIG_PATH 环境变量）
 │
 ├── pkg/                                # 无业务依赖的通用工具
-│   ├── sse/writer.go                   # SSE 帧封装 (Send / Done)
-│   └── template/reply.go               # Sprintf 话术模板（禁止 LLM 直接生成回复）
+│   ├── sse/
+│   │   └── writer.go                   # SSE 帧封装 (Send / Done)
+│   └── template/
+│       └── reply.go                    # Sprintf 话术模板（禁止 LLM 直接生成回复）
 │
-├── migrations/                         # 按序执行的数据库迁移
+├── migrations/                         # 按序执行的数据库迁移 SQL
 │   ├── 001_create_users.sql            # users 表 + pgvector + 更新触发器
 │   ├── 002_create_demand_pool.sql      # demand_pool 表
 │   ├── 003_create_indexes.sql          # GIN 索引（destinations）+ HNSW（embedding）
 │   └── 004_create_memories.sql         # memories 表（mem0）+ HNSW 向量索引
 │
-├── config/config.yaml                  # 配置模板（llm / db / redis / wechat / agent）
+├── config/
+│   ├── config.yaml.example             # 配置模板（无 API Key，纳入版本控制）
+│   ├── config.yaml                     # Docker 运行配置（host=postgres，已 gitignore）
+│   └── config.local.yaml               # 本地开发配置（host=localhost，已 gitignore）
+│
 ├── docker-compose.yaml                 # 一键启动：app + postgres + redis
-└── Dockerfile
+├── Dockerfile
+├── go.mod
+└── go.sum
 ```
 
 ---
@@ -201,7 +212,7 @@ POST /mcp/tools/call
 ### 前置依赖
 
 - Docker & Docker Compose
-- Go 1.22+（本地开发）
+- Go 1.25+（本地开发）
 
 ### 1. 克隆并配置
 
@@ -210,23 +221,41 @@ git clone git@github.com:initiallyqq/myagent.git
 cd myagent
 ```
 
-编辑 `config/config.yaml`，填入必填项：
+仓库提供两份配置模板，两个文件均已加入 `.gitignore`，不会意外推送 API Key：
+
+| 文件 | 用途 | db/redis host |
+|---|---|---|
+| `config/config.yaml` | Docker 容器内运行 | `postgres` / `redis`（容器服务名） |
+| `config/config.local.yaml` | 本地 `go run` 开发 | `localhost` |
+
+从示例文件生成两份配置：
+
+```bash
+# Docker 用
+cp config/config.yaml.example config/config.yaml
+
+# 本地开发用（host 已预设为 localhost）
+cp config/config.yaml.example config/config.local.yaml
+# 将 config.local.yaml 里的 host=postgres 改为 host=localhost
+# 将 redis addr 改为 localhost:6379
+```
+
+在两份文件中填入必填项：
 
 ```yaml
 llm:
-  api_key: "YOUR_DEEPSEEK_API_KEY"
+  provider: "qwen"                  # 已验证：Qwen 同时支持 chat + embedding
+  api_key: "YOUR_QWEN_API_KEY"      # 阿里云灵积 DashScope API Key
+  model: "qwen-plus"
+  embedding_model: "text-embedding-v3"
 
 wechat:
   app_id: "YOUR_WECHAT_APP_ID"
   app_secret: "YOUR_WECHAT_APP_SECRET"
   subscribe_template_id: "YOUR_TEMPLATE_ID"
-
-agent:
-  max_react_steps: 6
-  memory_top_k: 5
 ```
 
-### 2. 启动（全栈容器化）
+### 2. 启动（全栈容器化，使用 config/config.yaml）
 
 ```bash
 docker-compose up --build
@@ -234,15 +263,17 @@ docker-compose up --build
 
 服务将在 `http://localhost:8080` 启动，PostgreSQL 和 Redis 随之自动初始化。
 
-### 3. 本地开发模式
+### 3. 本地开发模式（使用 config/config.local.yaml）
 
 ```bash
 # 只启动基础设施
 docker-compose up -d postgres redis
 
-# 本地运行 Go 服务
-go run ./cmd/server
+# 用 CONFIG_PATH 指定本地配置文件
+CONFIG_PATH=config/config.local.yaml go run ./cmd/server
 ```
+
+> 程序启动时优先读取环境变量 `CONFIG_PATH`，未设置则默认读 `config/config.yaml`。
 
 ---
 
@@ -359,7 +390,7 @@ curl http://localhost:8080/health
 
 ## 落地红线
 
-1. **LLM 超时熔断**：所有 LLM 调用强制 `Timeout = 3s`，超时立即走正则兜底，不可用比不智能更可怕。
+1. **LLM 超时熔断**：搜索路由 LLM 调用强制 `Timeout = 60s`（ReAct 多步调用），其他接口 `5s`，超时立即走正则兜底，不可用比不智能更可怕。
 
 2. **ReAct 步数上限**：`max_react_steps = 6`，防止 Agent 陷入无限推理循环，超限直接返回当前最佳观察。
 
