@@ -37,3 +37,7 @@ wechat:
 cron:
   match_interval_minutes: 10
   match_similarity_threshold: 0.75
+
+agent:
+  max_react_steps: 6           # ReAct loop max iterations before giving up
+  memory_top_k: 5              # number of memories injected per request

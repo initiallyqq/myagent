@@ -30,7 +30,7 @@ func (r *UserRepo) Upsert(ctx context.Context, req *model.UserRegisterReq, embed
 	}
 
 	var embeddingArg any
-	if emb := vectorLiteral(embedding); emb != "" {
+	if emb := VectorLiteral(embedding); emb != "" {
 		embeddingArg = emb
 	}
 
@@ -76,7 +76,7 @@ func (r *UserRepo) HybridSearch(ctx context.Context, q *model.SearchQuery, limit
 
 	// vector param is always first
 	var embArg any
-	if emb := vectorLiteral(q.Embedding); emb != "" {
+	if emb := VectorLiteral(q.Embedding); emb != "" {
 		embArg = emb
 	}
 	args = append(args, embArg) // $1
@@ -175,10 +175,11 @@ func (r *UserRepo) GetEmbeddingByID(ctx context.Context, userID int64) ([]float3
 	return parseVectorLiteral(raw), nil
 }
 
-// vectorLiteral converts a float32 slice into PostgreSQL vector literal e.g. "[0.1,0.2,...]"
+// VectorLiteral converts a float32 slice into PostgreSQL vector literal e.g. "[0.1,0.2,...]"
 // Returns an empty string when the slice is empty; callers must pass it as a nullable
 // parameter when interacting with SQL.
-func vectorLiteral(v []float32) string {
+// Exported so the memory package can reuse it without circular dependency.
+func VectorLiteral(v []float32) string {
 	if len(v) == 0 {
 		return ""
 	}

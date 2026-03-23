@@ -24,7 +24,7 @@ func (r *DemandRepo) Insert(ctx context.Context, requesterID int64, intent *mode
 	if err != nil {
 		return 0, fmt.Errorf("marshal intent: %w", err)
 	}
-	embStr := vectorLiteral(embedding)
+	embStr := VectorLiteral(embedding)
 	var id int64
 	err = r.db.QueryRowContext(ctx, `
 		INSERT INTO demand_pool (requester_id, intent_json, intent_vector, status)

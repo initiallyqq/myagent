@@ -15,13 +15,17 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 
+	"myagent/internal/agent"
 	"myagent/internal/config"
 	"myagent/internal/cron"
 	"myagent/internal/handler"
 	"myagent/internal/llm"
+	"myagent/internal/mcp"
+	"myagent/internal/memory"
 	"myagent/internal/middleware"
 	"myagent/internal/repo"
 	"myagent/internal/service"
+	"myagent/internal/skill"
 )
 
 func main() {
@@ -82,13 +86,36 @@ func main() {
 	searchSvc := service.NewSearchService(userRepo, demandRepo, llmClient)
 	notifySvc := service.NewNotifyService(&cfg.WeChat)
 
+	// ── Memory layer (mem0) ─────────────────────────────────────────────────
+	memStore := memory.NewStore(db)
+	memManager := memory.NewManager(memStore, llmClient)
+
+	// ── Skill registry ──────────────────────────────────────────────────────
+	registry := skill.NewRegistry()
+
+	searchSkill := skill.NewSearchSkill(searchSvc, intentSvc)
+	memSkill := skill.NewMemorySkill(memManager, memStore)
+	suspendSkill := skill.NewSuspendSkill(demandRepo)
+	profileSkill := skill.NewProfileSkill(userRepo)
+
+	registry.Register(searchSkill)
+	registry.Register(memSkill)
+	registry.Register(suspendSkill)
+	registry.Register(profileSkill)
+
+	// ── Agent orchestrator ──────────────────────────────────────────────────
+	orchestrator := agent.NewOrchestrator(llmClient, registry, memManager)
+
+	// ── MCP server ──────────────────────────────────────────────────────────
+	mcpServer := mcp.NewServer(registry)
+
 	// ── Cron ────────────────────────────────────────────────────────────────
 	matchJob := cron.NewMatchJob(userRepo, demandRepo, notifySvc, &cfg.Cron)
 	cronCtx, cronCancel := context.WithCancel(context.Background())
 	go matchJob.Start(cronCtx)
 
 	// ── HTTP router ─────────────────────────────────────────────────────────
-	router := buildRouter(cfg, rdb, intentSvc, searchSvc, cacheSvc, userRepo, llmClient, notifySvc)
+	router := buildRouter(cfg, rdb, orchestrator, cacheSvc, memManager, userRepo, llmClient, notifySvc, mcpServer)
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),
@@ -124,12 +151,13 @@ func main() {
 func buildRouter(
 	cfg *config.Config,
 	rdb *redis.Client,
-	intentSvc *service.IntentService,
-	searchSvc *service.SearchService,
+	orchestrator *agent.Orchestrator,
 	cacheSvc *service.CacheService,
+	memManager *memory.Manager,
 	userRepo *repo.UserRepo,
 	llmClient *llm.Client,
 	notifySvc *service.NotifyService,
+	mcpServer *mcp.Server,
 ) *gin.Engine {
 	router := gin.New()
 	router.Use(gin.Recovery())
@@ -141,10 +169,14 @@ func buildRouter(
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "time": time.Now().Format(time.RFC3339)})
 	})
 
+	// MCP tool endpoints (no user rate limit — internal/LLM use)
+	mcpGroup := router.Group("/mcp")
+	mcpServer.RegisterRoutes(mcpGroup)
+
 	api := router.Group("/api/v1")
 	api.Use(middleware.RateLimit(rdb, cfg.RateLimit.RequestsPerMinute))
 
-	searchH := handler.NewSearchHandler(intentSvc, searchSvc, cacheSvc)
+	searchH := handler.NewSearchHandler(orchestrator, cacheSvc, memManager)
 	api.POST("/search", searchH.Handle)
 
 	userH := handler.NewUserHandler(userRepo, llmClient)

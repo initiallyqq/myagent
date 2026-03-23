@@ -14,13 +14,56 @@ import (
 	"myagent/internal/model"
 )
 
-const extractSystemPrompt = `你是一个旅行意图提取助手。从用户输入中提取关键信息，严格返回如下 JSON（不要包含任何 Markdown、解释或多余文字）：
-{"dest":"目的地（单个城市或地区，没有则为空字符串）","budget":预算数字（没有则为0）,"gender":"M或F或X或空字符串（M=找男伴，F=找女伴，X或空=不限）","personality_keywords":["性格关键词数组，如E人、内向、佛系等"],"available_month":月份数字（如5代表5月，没有则为0）}`
+// ──────────────────────────────────────────────────────────────
+// Shared types
+// ──────────────────────────────────────────────────────────────
 
-// Client calls the LLM API to extract structured intent from user input.
+// Message represents a single turn in the conversation.
+type Message struct {
+	Role       string     `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"` // role=tool
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // role=assistant
+	Name       string     `json:"name,omitempty"`
+}
+
+// ToolCall represents a tool invocation returned by the LLM.
+type ToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"` // "function"
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"` // raw JSON string
+	} `json:"function"`
+}
+
+// Tool defines a callable tool exposed to the LLM (OpenAI-compatible schema).
+type Tool struct {
+	Type     string   `json:"type"` // "function"
+	Function FuncSpec `json:"function"`
+}
+
+// FuncSpec is the JSON Schema description of a tool.
+type FuncSpec struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"`
+}
+
+// ChatReply is the response from a chat call.
+type ChatReply struct {
+	Content   string     // final text content (when no tool calls)
+	ToolCalls []ToolCall // tool calls to execute
+}
+
+// ──────────────────────────────────────────────────────────────
+// Client
+// ──────────────────────────────────────────────────────────────
+
+// Client calls the LLM API for intent extraction, embedding, and function calling.
 type Client struct {
-	cfg    *config.LLMConfig
-	http   *http.Client
+	cfg  *config.LLMConfig
+	http *http.Client
 }
 
 func NewClient(cfg *config.LLMConfig) *Client {
@@ -30,49 +73,47 @@ func NewClient(cfg *config.LLMConfig) *Client {
 	}
 }
 
+// ──────────────────────────────────────────────────────────────
+// Chat with Function Calling (core method)
+// ──────────────────────────────────────────────────────────────
+
 type chatRequest struct {
-	Model          string        `json:"model"`
-	Messages       []chatMessage `json:"messages"`
-	ResponseFormat *respFormat   `json:"response_format,omitempty"`
-	Temperature    float64       `json:"temperature"`
-}
-
-type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type respFormat struct {
-	Type string `json:"type"`
+	Model       string    `json:"model"`
+	Messages    []Message `json:"messages"`
+	Tools       []Tool    `json:"tools,omitempty"`
+	ToolChoice  string    `json:"tool_choice,omitempty"` // "auto" | "none"
+	Temperature float64   `json:"temperature"`
 }
 
 type chatResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content   string     `json:"content"`
+			ToolCalls []ToolCall `json:"tool_calls"`
 		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
 }
 
-// ExtractIntent calls the LLM to extract a structured Intent from raw user input.
-// Falls back to regex extraction if the call times out or returns invalid JSON.
-func (c *Client) ExtractIntent(ctx context.Context, userInput string) (*model.Intent, error) {
+// Chat sends a multi-turn conversation to the LLM, optionally with tools.
+// Returns either a final text reply or tool calls for the caller to execute.
+func (c *Client) Chat(ctx context.Context, messages []Message, tools []Tool) (*ChatReply, error) {
 	payload := chatRequest{
-		Model: c.cfg.Model,
-		Messages: []chatMessage{
-			{Role: "system", Content: extractSystemPrompt},
-			{Role: "user", Content: userInput},
-		},
-		ResponseFormat: &respFormat{Type: "json_object"},
-		Temperature:    0,
+		Model:       c.cfg.Model,
+		Messages:    messages,
+		Temperature: 0,
+	}
+	if len(tools) > 0 {
+		payload.Tools = tools
+		payload.ToolChoice = "auto"
 	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
+		return nil, fmt.Errorf("marshal chat request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.APIURL, bytes.NewReader(body))
@@ -84,7 +125,6 @@ func (c *Client) ExtractIntent(ctx context.Context, userInput string) (*model.In
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		// timeout or network error → signal caller to use regex fallback
 		return nil, fmt.Errorf("llm_timeout: %w", err)
 	}
 	defer resp.Body.Close()
@@ -98,10 +138,30 @@ func (c *Client) ExtractIntent(ctx context.Context, userInput string) (*model.In
 		return nil, fmt.Errorf("llm_api_error: %s", cr.Error.Message)
 	}
 
-	raw := strings.TrimSpace(cr.Choices[0].Message.Content)
-	// strip accidental markdown code fences
-	raw = stripCodeFence(raw)
+	choice := cr.Choices[0].Message
+	return &ChatReply{
+		Content:   strings.TrimSpace(choice.Content),
+		ToolCalls: choice.ToolCalls,
+	}, nil
+}
 
+// ──────────────────────────────────────────────────────────────
+// Legacy: ExtractIntent (used as fallback when Function Call fails)
+// ──────────────────────────────────────────────────────────────
+
+const extractSystemPrompt = `你是一个旅行意图提取助手。从用户输入中提取关键信息，严格返回如下 JSON（不要包含任何 Markdown、解释或多余文字）：
+{"dest":"目的地（单个城市或地区，没有则为空字符串）","budget":预算数字（没有则为0）,"gender":"M或F或X或空字符串（M=找男伴，F=找女伴，X或空=不限）","personality_keywords":["性格关键词数组，如E人、内向、佛系等"],"available_month":月份数字（如5代表5月，没有则为0）}`
+
+func (c *Client) ExtractIntent(ctx context.Context, userInput string) (*model.Intent, error) {
+	reply, err := c.Chat(ctx, []Message{
+		{Role: "system", Content: extractSystemPrompt},
+		{Role: "user", Content: userInput},
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	raw := stripCodeFence(reply.Content)
 	intent := &model.Intent{}
 	if err := json.Unmarshal([]byte(raw), intent); err != nil {
 		return nil, fmt.Errorf("llm_parse_json: %w (raw=%q)", err, raw)
@@ -112,7 +172,10 @@ func (c *Client) ExtractIntent(ctx context.Context, userInput string) (*model.In
 	return intent, nil
 }
 
-// EmbedText calls the LLM embedding API to produce a vector for given text.
+// ──────────────────────────────────────────────────────────────
+// Embedding
+// ──────────────────────────────────────────────────────────────
+
 func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) {
 	type embedReq struct {
 		Model string `json:"model"`
@@ -151,6 +214,10 @@ func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) 
 	}
 	return er.Data[0].Embedding, nil
 }
+
+// ──────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────
 
 func stripCodeFence(s string) string {
 	s = strings.TrimPrefix(s, "```json")

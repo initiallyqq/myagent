@@ -1,16 +1,16 @@
 package handler
 
 import (
-	"database/sql"
 	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 
-	"myagent/internal/model"
+	"myagent/internal/agent"
+	"myagent/internal/memory"
 	"myagent/internal/service"
-	pkgtmpl "myagent/pkg/template"
 	"myagent/pkg/sse"
+	pkgtmpl "myagent/pkg/template"
 )
 
 // SearchRequest is the HTTP body for the main search endpoint.
@@ -19,24 +19,23 @@ type SearchRequest struct {
 }
 
 // SearchHandler handles POST /api/v1/search with SSE streaming.
+// It delegates to the Agent Orchestrator which runs the ReAct loop
+// using Function Calling, mem0 memory injection, and the Skill registry.
 type SearchHandler struct {
-	intentSvc *service.IntentService
-	searchSvc *service.SearchService
-	cacheSvc  *service.CacheService
-	userRepo  interface {
-		GetByOpenID(ctx interface{}, openid string) (*model.User, error)
-	}
+	orchestrator *agent.Orchestrator
+	cacheSvc     *service.CacheService
+	memManager   *memory.Manager
 }
 
 func NewSearchHandler(
-	intentSvc *service.IntentService,
-	searchSvc *service.SearchService,
+	orch *agent.Orchestrator,
 	cacheSvc *service.CacheService,
+	memMgr *memory.Manager,
 ) *SearchHandler {
 	return &SearchHandler{
-		intentSvc: intentSvc,
-		searchSvc: searchSvc,
-		cacheSvc:  cacheSvc,
+		orchestrator: orch,
+		cacheSvc:     cacheSvc,
+		memManager:   memMgr,
 	}
 }
 
@@ -67,49 +66,40 @@ func (h *SearchHandler) Handle(c *gin.Context) {
 		return
 	}
 
-	// ── 2. Intent extraction ────────────────────────────────────────────────
-	intent, fromFallback, err := h.intentSvc.Extract(ctx, req.Query)
+	// ── 2. Resolve user identity ────────────────────────────────────────────
+	var userID int64
+	openID := c.GetHeader("X-Openid")
+
+	// ── 3. Load relevant memories (mem0) ────────────────────────────────────
+	memCtx := h.memManager.RetrieveContext(ctx, userID, req.Query)
+
+	// ── 4. Run Agent ReAct loop ─────────────────────────────────────────────
+	output, err := h.orchestrator.Run(ctx, agent.OrchestratorInput{
+		UserQuery: req.Query,
+		UserID:    userID,
+		OpenID:    openID,
+		MemoryCtx: memCtx,
+	})
 	if err != nil {
-		slog.Error("search: intent extraction failed", "err", err)
-		_ = sw.SendText(`{"error":"无法理解您的意图，请换个方式描述"}`)
-		sw.Done()
-		return
-	}
-	if fromFallback {
-		slog.Info("search: used regex fallback", "intent", intent)
-	}
-
-	// ── 3. Generate embedding for vector search ─────────────────────────────
-	embedding, embedErr := h.intentSvc.EmbedIntent(ctx, intent)
-	if embedErr != nil {
-		slog.Warn("search: embedding failed, proceeding without vector", "err", embedErr)
-	}
-
-	q := &model.SearchQuery{Intent: *intent, Embedding: embedding}
-
-	// ── 4. Resolve requester user ID ────────────────────────────────────────
-	var requesterID int64
-	if openid := c.GetHeader("X-Openid"); openid != "" {
-		// best-effort; ignore error if user not yet registered
-		if u, lookupErr := lookupUserByOpenID(c, openid); lookupErr == nil {
-			requesterID = u.ID
-		}
-	}
-
-	// ── 5. Hybrid search + degradation ─────────────────────────────────────
-	result, err := h.searchSvc.Search(ctx, q, requesterID)
-	if err != nil {
-		slog.Error("search: search failed", "err", err)
+		slog.Error("search: orchestrator failed", "err", err)
 		_ = sw.SendText(`{"error":"搜索服务暂时不可用，请稍后重试"}`)
 		sw.Done()
 		return
 	}
 
-	// ── 6. Build reply using string templates ──────────────────────────────
-	reply := pkgtmpl.BuildReply(result, req.Query)
+	// ── 5. Build final reply ────────────────────────────────────────────────
+	var reply *pkgtmpl.SearchReply
+	if output.Reply != nil {
+		reply = output.Reply
+	} else {
+		reply = &pkgtmpl.SearchReply{
+			Message: output.RawText,
+			Done:    true,
+		}
+	}
 
-	// ── 7. Write cache if we got real results ──────────────────────────────
-	if !result.Suspended && len(result.Users) > 0 {
+	// ── 6. Cache results ────────────────────────────────────────────────────
+	if reply.Done && len(reply.Users) > 0 {
 		if err := h.cacheSvc.Set(ctx, cacheKey, reply); err != nil {
 			slog.Warn("search: cache write failed", "err", err)
 		}
@@ -117,16 +107,4 @@ func (h *SearchHandler) Handle(c *gin.Context) {
 
 	_ = sw.Send(reply)
 	sw.Done()
-}
-
-// lookupUserByOpenID is a lightweight helper used only inside the handler
-// to avoid circular dependency on UserRepo.
-func lookupUserByOpenID(c *gin.Context, openid string) (*model.User, error) {
-	// Retrieved from Gin context if set by auth middleware
-	if raw, exists := c.Get("user"); exists {
-		if u, ok := raw.(*model.User); ok {
-			return u, nil
-		}
-	}
-	return nil, sql.ErrNoRows
 }
