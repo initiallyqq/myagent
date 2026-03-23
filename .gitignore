@@ -1,0 +1,20 @@
+# Binary
+myagent
+
+# Go build cache
+*.exe
+*.test
+*.out
+
+# Environment / secrets
+.env
+*.env.local
+config/config.local.yaml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
