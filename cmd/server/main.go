@@ -162,28 +162,29 @@ func buildRouter(
 	router := gin.New()
 	router.Use(gin.Recovery())
 	router.Use(gin.Logger())
-	router.Use(middleware.Timeout(time.Duration(cfg.Server.TimeoutSeconds) * time.Second))
 
-	// Health check (no rate limit)
+	// Health check (no rate limit, no timeout middleware)
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "time": time.Now().Format(time.RFC3339)})
 	})
 
 	// MCP tool endpoints (no user rate limit — internal/LLM use)
 	mcpGroup := router.Group("/mcp")
+	mcpGroup.Use(middleware.Timeout(time.Duration(cfg.Server.TimeoutSeconds) * time.Second))
 	mcpServer.RegisterRoutes(mcpGroup)
 
 	api := router.Group("/api/v1")
 	api.Use(middleware.RateLimit(rdb, cfg.RateLimit.RequestsPerMinute))
 
-	searchH := handler.NewSearchHandler(orchestrator, cacheSvc, memManager)
-	api.POST("/search", searchH.Handle)
+	// Search uses a much longer timeout to accommodate LLM ReAct multi-step calls
+	searchH := handler.NewSearchHandler(orchestrator, cacheSvc, memManager, userRepo)
+	api.POST("/search", middleware.Timeout(60*time.Second), searchH.Handle)
 
 	userH := handler.NewUserHandler(userRepo, llmClient)
-	api.POST("/user/register", userH.Register)
+	api.POST("/user/register", middleware.Timeout(time.Duration(cfg.Server.TimeoutSeconds)*time.Second), userH.Register)
 
 	subscribeH := handler.NewSubscribeHandler(notifySvc)
-	api.POST("/subscribe", subscribeH.Subscribe)
+	api.POST("/subscribe", middleware.Timeout(time.Duration(cfg.Server.TimeoutSeconds)*time.Second), subscribeH.Subscribe)
 
 	return router
 }

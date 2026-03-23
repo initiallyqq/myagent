@@ -14,13 +14,13 @@ redis:
   pool_size: 10
 
 llm:
-  provider: "deepseek"          # deepseek | qwen | gemini
-  api_key: "YOUR_API_KEY_HERE"
-  api_url: "https://api.deepseek.com/v1/chat/completions"
-  model: "deepseek-chat"
-  timeout_seconds: 3
-  embedding_url: "https://api.deepseek.com/v1/embeddings"
-  embedding_model: "deepseek-embedding"
+  provider: "qwen"
+  api_key: "YOUR_LLM_API_KEY"
+  api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+  model: "qwen-plus"
+  timeout_seconds: 60
+  embedding_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings"
+  embedding_model: "text-embedding-v3"
   embedding_dim: 1024
 
 cache:

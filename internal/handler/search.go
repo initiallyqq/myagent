@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 
@@ -8,6 +9,7 @@ import (
 
 	"myagent/internal/agent"
 	"myagent/internal/memory"
+	"myagent/internal/model"
 	"myagent/internal/service"
 	"myagent/pkg/sse"
 	pkgtmpl "myagent/pkg/template"
@@ -25,17 +27,24 @@ type SearchHandler struct {
 	orchestrator *agent.Orchestrator
 	cacheSvc     *service.CacheService
 	memManager   *memory.Manager
+	userRepo     userGetter
+}
+
+type userGetter interface {
+	GetByOpenID(ctx context.Context, openid string) (*model.User, error)
 }
 
 func NewSearchHandler(
 	orch *agent.Orchestrator,
 	cacheSvc *service.CacheService,
 	memMgr *memory.Manager,
+	userRepo userGetter,
 ) *SearchHandler {
 	return &SearchHandler{
 		orchestrator: orch,
 		cacheSvc:     cacheSvc,
 		memManager:   memMgr,
+		userRepo:     userRepo,
 	}
 }
 
@@ -69,6 +78,11 @@ func (h *SearchHandler) Handle(c *gin.Context) {
 	// ── 2. Resolve user identity ────────────────────────────────────────────
 	var userID int64
 	openID := c.GetHeader("X-Openid")
+	if openID != "" {
+		if u, err := h.userRepo.GetByOpenID(ctx, openID); err == nil {
+			userID = u.ID
+		}
+	}
 
 	// ── 3. Load relevant memories (mem0) ────────────────────────────────────
 	memCtx := h.memManager.RetrieveContext(ctx, userID, req.Query)

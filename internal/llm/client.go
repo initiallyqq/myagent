@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -130,6 +131,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message, tools []Tool) (*C
 	defer resp.Body.Close()
 
 	data, _ := io.ReadAll(resp.Body)
+	slog.Debug("llm chat raw response", "status", resp.StatusCode, "body", string(data))
 	var cr chatResponse
 	if err := json.Unmarshal(data, &cr); err != nil || len(cr.Choices) == 0 {
 		return nil, fmt.Errorf("llm_bad_response: %s", string(data))
@@ -177,9 +179,13 @@ func (c *Client) ExtractIntent(ctx context.Context, userInput string) (*model.In
 // ──────────────────────────────────────────────────────────────
 
 func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) {
+	if c.cfg.EmbeddingModel == "" || c.cfg.EmbeddingURL == "" {
+		return nil, fmt.Errorf("embed_disabled: no embedding model configured")
+	}
 	type embedReq struct {
-		Model string `json:"model"`
-		Input string `json:"input"`
+		Model     string `json:"model"`
+		Input     string `json:"input"`
+		Dimension int    `json:"dimension,omitempty"`
 	}
 	type embedResp struct {
 		Data []struct {
@@ -190,7 +196,7 @@ func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) 
 		} `json:"error,omitempty"`
 	}
 
-	payload, _ := json.Marshal(embedReq{Model: c.cfg.EmbeddingModel, Input: text})
+	payload, _ := json.Marshal(embedReq{Model: c.cfg.EmbeddingModel, Input: text, Dimension: c.cfg.EmbeddingDim})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.EmbeddingURL, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
