@@ -41,7 +41,7 @@ MCP Server (/mcp/tools/list, /mcp/tools/call)
 
 | 组件 | 选型 | 理由 |
 |---|---|---|
-| 业务层 | Go 1.22 / Gin | 高并发，原生 SSE 支持 |
+| 业务层 | Go 1.25 / Gin | 高并发，原生 SSE 支持 |
 | 大模型 | DeepSeek-V3 / Qwen-Max | Function Calling + JSON Mode |
 | Agent 范式 | ReAct (Reason + Act + Observe) | 多轮自主推理，最大 6 步 |
 | 记忆层 | mem0 风格持久记忆 | 向量检索历史记忆 + System Prompt 注入 |
