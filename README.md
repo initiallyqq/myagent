@@ -55,59 +55,77 @@ MCP Server (/mcp/tools/list, /mcp/tools/call)
 
 ## 项目结构
 
+按分层架构组织，从接入层到存储层依次向下：
+
 ```
 myagent/
-├── cmd/server/main.go              # 入口：依赖注入、路由、优雅关机
+│
+├── cmd/server/main.go                  # 程序入口：依赖注入 / 路由注册 / 优雅关机
+│
 ├── internal/
-│   ├── config/config.go            # YAML 配置加载（单例）
-│   ├── agent/
-│   │   └── orchestrator.go         # ReAct Agent 循环 (Reason→Act→Observe)
-│   ├── memory/
-│   │   ├── store.go                # mem0 持久记忆：向量存取、语义召回
-│   │   └── manager.go              # 记忆提取（LLM）+ 上下文注入
-│   ├── mcp/
-│   │   ├── tools.go                # OpenAI 兼容 Tool 定义 (ToolDefs)
-│   │   └── server.go               # MCP HTTP 端点：/mcp/tools/list, /mcp/tools/call
-│   ├── skill/
-│   │   ├── registry.go             # Skill 接口 + Registry 调度
-│   │   ├── search.go               # SearchSkill: 三级降级混合检索
-│   │   ├── memory_skill.go         # MemorySkill: 持久化记忆事实
-│   │   ├── suspend.go              # SuspendSkill: 意图悬挂写 demand_pool
-│   │   └── profile.go              # ProfileSkill: 查询当前用户画像
+│   │
+│   ├── ── 接入层 ──────────────────────────────────────────
 │   ├── handler/
-│   │   ├── search.go               # POST /api/v1/search → Orchestrator
-│   │   ├── user.go                 # POST /api/v1/user/register
-│   │   └── subscribe.go            # POST /api/v1/subscribe
+│   │   ├── search.go                   # POST /api/v1/search  → Orchestrator → SSE
+│   │   ├── user.go                     # POST /api/v1/user/register
+│   │   └── subscribe.go                # POST /api/v1/subscribe
 │   ├── middleware/
-│   │   ├── ratelimit.go            # Redis 滑动窗口限流
-│   │   └── timeout.go              # 请求级超时中间件
+│   │   ├── ratelimit.go                # Redis 滑动窗口限流
+│   │   └── timeout.go                  # 请求级超时中间件
+│   │
+│   ├── ── Agent 层 ─────────────────────────────────────────
+│   ├── agent/
+│   │   └── orchestrator.go             # ReAct 循环 (Reason → Act → Observe, max 6步)
+│   ├── memory/
+│   │   ├── store.go                    # mem0 持久记忆：向量写入 / 语义召回 / 最近记忆
+│   │   └── manager.go                  # 记忆提取（异步 LLM 抽取）+ System Prompt 注入
+│   ├── mcp/
+│   │   ├── tools.go                    # OpenAI 兼容 Tool Schema 定义 (ToolDefs)
+│   │   └── server.go                   # MCP HTTP 端点：GET /mcp/tools/list, POST /mcp/tools/call
+│   ├── skill/
+│   │   ├── registry.go                 # Skill 接口 + Registry（注册 / 调度 / ToolDispatcher）
+│   │   ├── search.go                   # SearchSkill     → 三级降级混合检索
+│   │   ├── memory_skill.go             # MemorySkill     → 持久化记忆事实
+│   │   ├── suspend.go                  # SuspendSkill    → 意图悬挂写 demand_pool
+│   │   └── profile.go                  # ProfileSkill    → 查询当前用户画像
+│   │
+│   ├── ── 业务服务层 ───────────────────────────────────────
 │   ├── service/
-│   │   ├── intent.go               # LLM 提取 → 防腐校验 → 正则合并
-│   │   ├── search.go               # 三级降级检索 + 意图悬挂
-│   │   ├── cache.go                # SHA256 语义缓存 Key
-│   │   └── notify.go               # 微信 Access Token 管理 + 消息发送
-│   ├── model/
-│   │   ├── user.go                 # 用户领域模型
-│   │   ├── demand.go               # 需求池模型
-│   │   └── intent.go               # Intent struct + Validate()
-│   ├── repo/
-│   │   ├── user_repo.go            # Upsert + HybridSearch + VectorLiteral()
-│   │   └── demand_repo.go          # CRUD + 批量余弦相似度查询
+│   │   ├── intent.go                   # LLM 意图提取 → 防腐校验 → 正则兜底合并
+│   │   ├── search.go                   # 三级降级检索主逻辑 + 意图悬挂触发
+│   │   ├── cache.go                    # SHA256 语义缓存 Key / Redis TTL 管理
+│   │   └── notify.go                   # 微信 Access Token 刷新 + 订阅消息发送
+│   ├── cron/
+│   │   └── match_job.go                # 定时反向匹配（新用户唤醒 demand_pool）
+│   │
+│   ├── ── LLM 层 ───────────────────────────────────────────
 │   ├── llm/
-│   │   ├── client.go               # HTTP 调用 LLM；Chat() 支持 Function Calling
-│   │   └── fallback_regex.go       # 正则兜底（目的地词典、性别、预算）
-│   └── cron/
-│       └── match_job.go            # 定时反向匹配 + 新用户触发唤醒
-├── pkg/
-│   ├── sse/writer.go               # SSE 帧封装 (Send / Done)
-│   └── template/reply.go           # Sprintf 话术模板，禁止 LLM 生成回复
-├── migrations/
-│   ├── 001_create_users.sql        # users 表 + pgvector + 触发器
-│   ├── 002_create_demand_pool.sql  # demand_pool 表
-│   ├── 003_create_indexes.sql      # GIN + HNSW 索引
-│   └── 004_create_memories.sql     # memories 表（mem0 持久记忆 + HNSW）
-├── config/config.yaml              # 配置模板（含 agent 段）
-├── docker-compose.yaml
+│   │   ├── client.go                   # HTTP 调用 LLM；支持 JSON Mode + Function Calling
+│   │   └── fallback_regex.go           # 正则兜底：目的地词典 / 性别 / 预算解析
+│   │
+│   ├── ── 数据层 ───────────────────────────────────────────
+│   ├── repo/
+│   │   ├── user_repo.go                # Upsert / HybridSearch / VectorLiteral()
+│   │   └── demand_repo.go              # CRUD + 批量余弦相似度查询
+│   ├── model/
+│   │   ├── user.go                     # 用户领域模型
+│   │   ├── demand.go                   # 需求池模型
+│   │   └── intent.go                   # Intent struct + Validate()
+│   │
+│   └── config/config.go                # YAML 配置加载（单例）
+│
+├── pkg/                                # 无业务依赖的通用工具
+│   ├── sse/writer.go                   # SSE 帧封装 (Send / Done)
+│   └── template/reply.go               # Sprintf 话术模板（禁止 LLM 直接生成回复）
+│
+├── migrations/                         # 按序执行的数据库迁移
+│   ├── 001_create_users.sql            # users 表 + pgvector + 更新触发器
+│   ├── 002_create_demand_pool.sql      # demand_pool 表
+│   ├── 003_create_indexes.sql          # GIN 索引（destinations）+ HNSW（embedding）
+│   └── 004_create_memories.sql         # memories 表（mem0）+ HNSW 向量索引
+│
+├── config/config.yaml                  # 配置模板（llm / db / redis / wechat / agent）
+├── docker-compose.yaml                 # 一键启动：app + postgres + redis
 └── Dockerfile
 ```
 
