@@ -9,7 +9,6 @@ myagent
 # Environment / secrets
 .env
 *.env.local
-config/config.yaml
 config/config.local.yaml
 
 # IDE
